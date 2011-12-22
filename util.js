@@ -30,7 +30,7 @@ function Set() {
     this.clear();
 };
 _.extend(Set.prototype, {
-    'length': 0
+    'length': 0,
 
     'add': function(value) {
         var key = this.makeKey(value);

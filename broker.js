@@ -708,7 +708,6 @@ util.makePrototype(Request, BrokerNode, {
         if (_.all(this.names, isSatisfied) &&
             ((!oldState.initialized && newState.initialized) ||
              _.any(this.names, isChanged))) {
-            this.debug && console.debug('%o(%o) notify(%o)', this, this.names, _.restrict(this.broker.values, this.names));
             this.notify();
         }
         return this;
@@ -769,13 +768,11 @@ _.extend(Calculation.prototype, {
 
     'debug': false,
 
-    'profile': false, // `console.profile()`
-
     'defaultValue': undefined,
 
     // Default to calculations with no sources.
     // These are triggered when they are requested.
-    'sources': []
+    'sources': [],
 
     // Cancel a calculation. Remove it from the broker and uncalculate if
     // necessary.
@@ -811,11 +808,7 @@ _.extend(Calculation.prototype, {
     'performCalculate': function() {
         this.broker.debugName(this.target) && console.debug('%o(target=%o, sources=%o) calculate', this, this.target, this.getSources());
         var oldValue = this.get();
-
-        this.profile && console.profile(this.target + ' calc');
         var value = this.calculate(this.broker.values, oldValue);
-        this.profile && console.profileEnd(this.target + ' calc');
-
         this[_.isDeferred(value) ? 'defer': 'set'](value);
         return this;
     },
@@ -916,7 +909,7 @@ util.makePrototype(Property, BrokerNode, {
 
     'sourceValues': function() {
         var values = {};
-        this.sources.each(function(property) {
+        this.sources._('each', function(property) {
             values[property.name] = property.value;
         }, this);
         return values;
@@ -974,7 +967,7 @@ util.makePrototype(Property, BrokerNode, {
 
     // state transitions
 
-    function getState() {
+    'getState': function() {
         return {
             'calculation': this.calculation,
             'canCalculate': this.canCalculate(),
@@ -1105,7 +1098,7 @@ util.makePrototype(Property, BrokerNode, {
 
 
 function NodeSet() {
-    Set.apply(this, arguments);
+    util.Set.apply(this, arguments);
 };
 util.makePrototype(NodeSet, util.Set, {
     'makeKey': function(node) {
