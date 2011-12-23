@@ -1,9 +1,10 @@
-{ "name": "databroker",
-  "version": "1.0.0",
-  "description": "Reactive Programming style code execution scheduler",
-  "keywords": ["functional", "reactive"],
-  "author": "Jeremy Latt <jeremy.latt@gmail.com>",
-  "dependencies": {
-      "underscore": "1.1.7"
-  },
-  "main": "broker.js" }
+{"name": "databroker",
+ "version": "1.0.0",
+ "description": "Reactive Programming style code execution scheduler",
+ "keywords": ["functional", "reactive"],
+ "author": "Jeremy Latt <jeremy.latt@gmail.com>",
+ "repository": {"type": "git",
+                "url": "http://github.com/jlatt/databroker.git"},
+ "dependencies": {"underscore": "1.1.7",
+                  "deferred": "0.2.6"},
+ "main": "broker.js"}

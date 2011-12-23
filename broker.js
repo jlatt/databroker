@@ -1,6 +1,13 @@
 'use strict';
 var _ = require('underscore');
 var util = require('./util.js');
+var deferred = require('deferred');
+
+// Heuristically check to see if a value is a Deferred.
+function isDeferred(object) {
+    return !!object && _.isFunction(object.then);
+};
+
 
 // Create an object that brokers named values and mediates calculations for values that depend on
 // other names. Deferred calculations have native support.
@@ -85,7 +92,7 @@ _.extend(Broker.prototype, {
     // Get all names from the broker as an object.
     'getAll': function(names) {
         var all = {};
-        return _.each(names, function(name) {
+        _.each(names, function(name) {
             all[name] = this.get(name);
         }, this);
         return all;
@@ -133,23 +140,23 @@ _.extend(Broker.prototype, {
         return this;
     },
 
-    'defer': function(name, deferred) {
+    'defer': function(name, future) {
         this
             .enqueue({
                 'name': name,
                 'action': 'defer',
-                'args': [deferred]
+                'args': [future]
             })
             .process();
         return this;
     },
 
-    'complete': function(name, deferred, value) {
+    'complete': function(name, future, value) {
         this
             .enqueue({
                 'name': name,
                 'action': 'complete',
-                'args': [deferred, value]
+                'args': [future, value]
             })
             .process();
         return this;
@@ -177,8 +184,6 @@ _.extend(Broker.prototype, {
 
     'process': function() {
         if (!this.processing) {
-            this.debug && console.group('process()');
-
             this.processing = true;
             // Track changed values. Clear the set only after completely leaving the processing
             // loop. This ensures that subsequent triggered calculations can consider changes
@@ -186,19 +191,16 @@ _.extend(Broker.prototype, {
             this.valueChanged = {};
 
             while (this.changeQueue.length > 0) {
-                this.debug && console.group('processing');
                 this
                     .processingLoop
                     .takeChanges()
                     .lockNodes()
                     .modifyNodes()
                     .unlockAll();
-                this.debug && console.groupEnd('processing');
             } // end change queue processing loop
 
             delete this.valueChanged;
             this.processing = false;
-            this.debug && console.groupEnd('process()');
         }
         return this;
     },
@@ -238,19 +240,20 @@ util.makePrototype(DataBroker, Broker, {
 
     // Wait for a value. This is a common shorthand for `request()`.
     'waitFor': function(name, context) {
-        var deferred = $.Deferred();
+        var future = deferred();
         var request = this.request({
             'name': name,
-            'value': function() {
+            'value': function(v) {
                 this.cancel();
-                deferred.resolveWith(context || this, arguments);
+                future.resolve(value);
             }
         });
-        deferred.request = request;
-        deferred.abort = function() {
+        var promise = future.promise;
+        promise.request = request;
+        promise.abort = function() {
             this.request.cancel();
         };
-        return deferred;
+        return promise;
     },
 
     // debugging
@@ -277,7 +280,7 @@ util.makePrototype(DataBroker, Broker, {
     },
 
     'log': function(name) {
-        return this.waitFor(name).done(function(value) {
+        return this.waitFor(name).then(function(value) {
             console.log(name, value);
         });
     },
@@ -318,6 +321,8 @@ function ProcessingLoop(broker) {
 };
 _.extend(ProcessingLoop.prototype, {
     'debug': false,
+
+    'safe': true,
 
     // Sort changes. First, modify edges. Then, set values.
     'actionToKey': {
@@ -371,7 +376,7 @@ _.extend(ProcessingLoop.prototype, {
 
     // Unlock self-locked nodes. This triggers calculations and observers.
     'unlockAll': function() {
-        this.locked._('each', this.debug ? this.unlockSelf : this.safeUnlockSelf, this);
+        this.locked._('each', this.safe ? this.safeUnlockSelf : this.unlockSelf, this);
         this.debug && this.debugLocked('unlocked');
         this.locked.clear();
         this.sourcesLocked.clear();
@@ -385,7 +390,7 @@ _.extend(ProcessingLoop.prototype, {
     'debugLocked': function(label) {
         console.group(label);
         this.locked._('each', function(node) {
-            console.debug('%o(%o)', node, node.name || node.names);
+            console.log('%o(%o)', node, node.name || node.names);
         }, this);
         console.groupEnd(label);
         return this;
@@ -406,7 +411,7 @@ _.extend(ProcessingLoop.prototype, {
         try {
             this.unlockSelf(node);
         } catch (ex) {
-            // TODO logging
+            console.error(ex.stack);
         }
     },
 
@@ -499,14 +504,19 @@ function BrokerNode(broker) {
 };
 _.extend(BrokerNode.prototype, {
     'debug': false,
+
     'initialized': false,
 
+    'destroyProps': ['sinks', 'sources', 'locks'],
+
     'destroy': function() {
-        delete this.broker;
-        _.each(['sinks', 'sources', 'locks'], function(key) {
-            this[key].clear();
-            delete this[key];
-        }, this);
+        if (this.broker) {
+            _.each(this.destroyProps, function(key) {
+                this[key].clear();
+                delete this[key];
+            }, this);
+            delete this.broker;
+        }
         return this;
     },
 
@@ -806,16 +816,16 @@ _.extend(Calculation.prototype, {
     // Gather sources and call `calculate()`.
     // Handle deferred calculations.
     'performCalculate': function() {
-        this.broker.debugName(this.target) && console.debug('%o(target=%o, sources=%o) calculate', this, this.target, this.getSources());
+        this.broker.debugName(this.target) && console.log('%o(target=%o, sources=%o) calculate', this, this.target, this.getSources());
         var oldValue = this.get();
         var value = this.calculate(this.broker.values, oldValue);
-        this[_.isDeferred(value) ? 'defer': 'set'](value);
+        this[isDeferred(value) ? 'defer': 'set'](value);
         return this;
     },
 
     'performUncalculate': function() {
         var oldValue = this.get();
-        this.broker.debugName(this.target) && console.debug('%o(target=%o) uncalculate', this, this.target);
+        this.broker.debugName(this.target) && console.log('%o(target=%o) uncalculate', this, this.target);
 
         this.profile && console.profile(this.target + ' uncalc');
         this.uncalculate(oldValue);
@@ -840,8 +850,8 @@ _.extend(Calculation.prototype, {
         return this;
     },
 
-    'defer': function(deferred) {
-        this.broker.defer(this.target, deferred);
+    'defer': function(future) {
+        this.broker.defer(this.target, future);
         return this;
     },
 
@@ -1003,7 +1013,7 @@ util.makePrototype(Property, BrokerNode, {
 
     'addRequest': function(request) {
         return this.changeRequested(function() {
-            this.debugName() && console.debug('%o(%o) add request %o', this, this.name, request);
+            this.debugName() && console.log('%o(%o) add request %o', this, this.name, request);
             this.requests.add(request);
             this.addSink(request);
         });
@@ -1011,7 +1021,7 @@ util.makePrototype(Property, BrokerNode, {
 
     'removeRequest': function(request) {
         return this.changeRequested(function() {
-            this.debugName() && console.debug('%o(%o) remove request %o', this, this.name, request);
+            this.debugName() && console.log('%o(%o) remove request %o', this, this.name, request);
             this.requests.remove(request);
             this.removeSink(request);
         });
@@ -1025,7 +1035,7 @@ util.makePrototype(Property, BrokerNode, {
             var oldValue = this.broker.oldValues[this.name] = this.value;
             this.broker.values[this.name] = this.value = value;
             this.broker.valueChanged[this.name] = true;
-            this.debugName() && console.debug('%o(%o) %o => %o', this, this.name, oldValue, value);
+            this.debugName() && console.log('%o(%o) %o => %o', this, this.name, oldValue, value);
         }
 
         this.unlockSinks();
@@ -1041,28 +1051,29 @@ util.makePrototype(Property, BrokerNode, {
         return this.set(undefined);
     },
 
-    'defer': function(deferred) {
+    'defer': function(promise) {
         this.interrupt();
-        this.deferred = deferred;
-        this.debugName() && console.debug('%o(%o) deferred', this, this.name);
+        this.deferred = promise;
+        this.debugName() && console.log('%o(%o) deferred', this, this.name);
 
         var property = this;
-        deferred
-            .done(function(value) {
-                property.broker.complete(property.name, deferred, value);
-            })
-            .fail(function() {
-                property.broker.complete(property.name, deferred, undefined);
-            });
+        promise.then(
+            function done(value) {
+                property.broker.complete(property.name, promise, value);
+            },
+            function fail() {
+                property.broker.complete(property.name, promise, undefined);
+            }
+        );
 
         this.unlockSinks();
 
         return this;
     },
 
-    'complete': function(deferred, value) {
-        if (this.deferred === deferred) {
-            this.debugName() && console.debug('%o(%o) complete', this, this.name);
+    'complete': function(future, value) {
+        if (this.deferred === future) {
+            this.debugName() && console.log('%o(%o) complete', this, this.name);
             this.deferred = null;
             this.set(value);
         }
@@ -1073,7 +1084,7 @@ util.makePrototype(Property, BrokerNode, {
         util.assert(this.calculation === null, 'duplicate calculation: ' + this.name);
 
         this.calculation = calc;
-        this.debugName() && console.debug('%o(%o) calculation=%o', this, this.name, this.calculation);
+        this.debugName() && console.log('%o(%o) calculation=%o', this, this.name, this.calculation);
 
         _.each(calc.sources, function(name) {
             var source = this.broker.properties.get(name);
@@ -1086,7 +1097,7 @@ util.makePrototype(Property, BrokerNode, {
     'removeCalculation': function(calculation) {
         util.assert(this.calculation === calculation, 'invalid calculation removal: ' + this.name);
         this.calculation = null;
-        this.debugName() && console.debug('%o(%o) calculation=%o', this, this.name, this.calculation);
+        this.debugName() && console.log('%o(%o) calculation=%o', this, this.name, this.calculation);
 
         this.sources._('each', function(source) {
             this.removeSource(source);

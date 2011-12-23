@@ -1,7 +1,9 @@
 'use strict';
 var _ = require('underscore');
 var assert = require('assert');
+var deferred = require('deferred');
 var DataBroker = require('./broker.js').DataBroker;
+
 
 
 function run(test) {
@@ -73,20 +75,25 @@ run(function testCalculation(broker) {
 });
 
 run(function deferredCalculation(broker) {
-    var deferred = $.Deferred();
+    var triggered = false;
+    var future = deferred();
     broker.calculate({
         'target': 'bar',
-        'sources': ['foo'],
-        'calculate': function(values) {
-            return deferred;
+        'calculate': function() {
+            return future.promise;
         }
     });
-    broker.request('bar');
-    broker.set('foo', true);
+    broker.request({
+        'name': 'bar',
+        'value': function(bar) {
+            assert.strictEqual(broker.get('bar'), 5, 'should have bar');
+            triggered = true;
+        }
+    });
     assert.ok(!broker.has('bar'), 'broker should not have bar');
-    deferred.resolve(5);
-    assert.ok(broker.has('bar'), 'broker should have bar');
-    assert.strictEqual(5, broker.get('bar'));
+    future.resolve(5);
+    deferred.wait(future.promise);
+    ok(triggered, 'not triggered');
 });
 
 // Test a dependency tree. Following lines indicate dependency.
