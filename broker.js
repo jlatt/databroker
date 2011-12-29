@@ -1,16 +1,10 @@
 'use strict';
 var _ = require('underscore');
 var util = require('./util.js');
-var deferred = require('deferred');
-
-// Heuristically check to see if a value is a Deferred.
-function isDeferred(object) {
-    return !!object && _.isFunction(object.then);
-};
 
 
 // Create an object that brokers named values and mediates calculations for values that depend on
-// other names. Deferred calculations have native support.
+// other names.
 function Broker() {
     this.changeQueue = [];
     this.properties = new util.DefaultDict(function(key) {
@@ -140,28 +134,6 @@ _.extend(Broker.prototype, {
         return this;
     },
 
-    'defer': function(name, future) {
-        this
-            .enqueue({
-                'name': name,
-                'action': 'defer',
-                'args': [future]
-            })
-            .process();
-        return this;
-    },
-
-    'complete': function(name, future, value) {
-        this
-            .enqueue({
-                'name': name,
-                'action': 'complete',
-                'args': [future, value]
-            })
-            .process();
-        return this;
-    },
-
     'enqueue': function(command) {
         this.changeQueue.push(command);
         return this;
@@ -191,8 +163,7 @@ _.extend(Broker.prototype, {
             this.valueChanged = {};
 
             while (this.changeQueue.length > 0) {
-                this
-                    .processingLoop
+                this.processingLoop
                     .takeChanges()
                     .lockNodes()
                     .modifyNodes()
@@ -238,24 +209,6 @@ util.makePrototype(DataBroker, Broker, {
         });
     },
 
-    // Wait for a value. This is a common shorthand for `request()`.
-    'waitFor': function(name, context) {
-        var future = deferred();
-        var request = this.request({
-            'name': name,
-            'value': function(v) {
-                this.cancel();
-                future.resolve(value);
-            }
-        });
-        var promise = future.promise;
-        promise.request = request;
-        promise.abort = function() {
-            this.request.cancel();
-        };
-        return promise;
-    },
-
     // debugging
 
     'analyze': function(name, cache) {
@@ -265,7 +218,6 @@ util.makePrototype(DataBroker, Broker, {
             cache[name] = info = {
                 'name': name,
                 'value': this.get(name),
-                'isDeferred': this.isDeferred(name),
                 'requests': this.requests.get(name).length
             };
             var calc = this.calculations[name];
@@ -331,9 +283,7 @@ _.extend(ProcessingLoop.prototype, {
         'addRequest': 2,
         'removeRequest': 3,
         'set': 4,
-        'complete': 5,
-        'modify': 6,
-        'defer': 7},
+        'modify': 6},
 
     'makeChangeSortKey': function(change) {
         return this.actionToKey[change.action];
@@ -465,24 +415,13 @@ _.extend(ProcessingLoop.prototype, {
     },
 
     'set': function(property) {
-        property.sinks._('each', function(sink) {
-            this.lockSelf(sink);
-        }, this);
+        property.sinks._('each', this.lockSelf, this);
 
         return this;
-    },
-
-    'complete': function() {
-        return this.set.apply(this, arguments);
     },
 
     'modify': function() {
         return this.set.apply(this, arguments);
-    },
-
-    'defer': function() {
-        // no op
-        return this;
     }
 });
 
@@ -814,12 +753,11 @@ _.extend(Calculation.prototype, {
     },
 
     // Gather sources and call `calculate()`.
-    // Handle deferred calculations.
     'performCalculate': function() {
         this.broker.debugName(this.target) && console.log('%o(target=%o, sources=%o) calculate', this, this.target, this.getSources());
         var oldValue = this.get();
         var value = this.calculate(this.broker.values, oldValue);
-        this[isDeferred(value) ? 'defer': 'set'](value);
+        this.set(value);
         return this;
     },
 
@@ -850,11 +788,6 @@ _.extend(Calculation.prototype, {
         return this;
     },
 
-    'defer': function(future) {
-        this.broker.defer(this.target, future);
-        return this;
-    },
-
     'remove': function() {
         this.broker.remove(this.target);
         return this;
@@ -882,8 +815,6 @@ function Property(broker, name) {
 util.makePrototype(Property, BrokerNode, {
     'calculation': null,
 
-    'deferred': null,
-
     'value': undefined,
 
     'destroy': function() {
@@ -896,10 +827,6 @@ util.makePrototype(Property, BrokerNode, {
 
     'hasValue': function() {
         return this.value !== undefined;
-    },
-
-    'isDeferred': function() {
-        return !!this.deferred;
     },
 
     'hasSources': function() {
@@ -926,22 +853,6 @@ util.makePrototype(Property, BrokerNode, {
     },
 
     // utility
-
-    // Interrupt a deferred, if present.
-    // This function does not update connected properties.
-    'interrupt': function() {
-        if (this.deferred) {
-            if (this.deferred.abort) {
-                try {
-                    this.deferred.abort();
-                } catch (ex) {
-                    // gulp!
-                }
-            }
-            this.deferred = null;
-        }
-        return this;
-    },
 
     'debugName': function() {
         return this.broker.debugName(this.name);
@@ -1030,7 +941,6 @@ util.makePrototype(Property, BrokerNode, {
     'set': function(value) {
         if (!_.isEqual(this.value, value)) {
             // TODO check for double set
-            this.interrupt();
             // Provide values in the interface for calculations and requests.
             var oldValue = this.broker.oldValues[this.name] = this.value;
             this.broker.values[this.name] = this.value = value;
@@ -1049,35 +959,6 @@ util.makePrototype(Property, BrokerNode, {
 
     'remove': function() {
         return this.set(undefined);
-    },
-
-    'defer': function(promise) {
-        this.interrupt();
-        this.deferred = promise;
-        this.debugName() && console.log('%o(%o) deferred', this, this.name);
-
-        var property = this;
-        promise.then(
-            function done(value) {
-                property.broker.complete(property.name, promise, value);
-            },
-            function fail() {
-                property.broker.complete(property.name, promise, undefined);
-            }
-        );
-
-        this.unlockSinks();
-
-        return this;
-    },
-
-    'complete': function(future, value) {
-        if (this.deferred === future) {
-            this.debugName() && console.log('%o(%o) complete', this, this.name);
-            this.deferred = null;
-            this.set(value);
-        }
-        return this;
     },
 
     'setCalculation': function(calc) {
