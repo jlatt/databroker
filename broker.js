@@ -181,6 +181,22 @@ _.extend(Broker.prototype, {
     }
 });
 
+function ConstantCalculation(target, value) {
+    this.target = target;
+    this.value = value;
+};
+ConstantCalculation.prototype.calculate = function() {
+    return this.value;
+};
+
+function AliasCalculation(to, from) {
+    this.target = to;
+    this.sources = [from];
+};
+AliasCalculation.prototype.calculate = function(sources) {
+    return sources[this.sources[0]];
+};
+
 // A Broker with useful shorthand functions.
 function DataBroker() {
     Broker.apply(this, arguments);
@@ -191,22 +207,11 @@ util.makePrototype(DataBroker, Broker, {
     //    broker.calculate({'from': 'source', 'to': 'target'});
     //
     'alias': function(kwargs) {
-        return this.calculate({
-            'target': kwargs.to,
-            'sources': [kwargs.from],
-            'calculate': function(sources) {
-                return sources[kwargs.from];
-            }
-        });
+        return this.calculate(new AliasCalculation(kwargs.to, kwargs.from));
     },
 
     'constant': function(kwargs) {
-        return this.calculate({
-            'target': kwargs.target,
-            'calculate': function() {
-                return kwargs.value;
-            }
-        });
+        return this.calculate(new ConstantCalculation(kwargs.target, kwargs.value));
     },
 
     // debugging
@@ -229,12 +234,6 @@ util.makePrototype(DataBroker, Broker, {
             }
         }
         return info;
-    },
-
-    'log': function(name) {
-        return this.waitFor(name).then(function(value) {
-            console.log(name, value);
-        });
     },
 
     'getDependencies': function(name) {
