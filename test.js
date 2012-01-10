@@ -31,7 +31,7 @@ run(function testGetSet(broker) {
     assert.strictEqual(broker.get('foo'), true, 'foo should be true');
 });
 
-run(function testRequest(broker) {
+run(function testAddRequest(broker) {
     var triggered = false;
     broker.request({
         'name': 'foo',
@@ -42,6 +42,16 @@ run(function testRequest(broker) {
     });
     broker.set('foo', 10);
     assert.ok(triggered, 'did not trigger');
+});
+
+run(function testRemoveRequest(broker) {
+    var foo = 653;
+    broker.constant({'target': 'foo', 'value': foo});
+    assert.ok(!broker.has('foo'), 'should not have foo');
+    var r = broker.request('foo');
+    assert.strictEqual(broker.get('foo'), foo, 'foo should be ' + foo);
+    r.cancel();
+    assert.ok(!broker.has('foo'), 'should not have foo');
 });
 
 run(function testCalculation(broker) {

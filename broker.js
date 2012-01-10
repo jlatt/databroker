@@ -572,24 +572,6 @@ _.extend(BrokerNode.prototype, {
             sink.removeLock(this);
         }
         return this;
-    },
-
-    // Add a source. Requests (weakly) follow the source edge.
-    'addSource': function(source) {
-        this.sources.add(source);
-        if (this.isRequested()) {
-            source.addWeakRequest(this);
-        }
-        return this;
-    },
-
-    // Remove a source. Requests (weakly) follow the source edge.
-    'removeSource': function(source) {
-        this.sources.remove(source);
-        if (this.isRequested()) {
-            source.removeWeakRequest(this);
-        }
-        return this;
     }
 });
 
@@ -922,9 +904,28 @@ util.makePrototype(Property, BrokerNode, {
 
     // broker changes
 
+    // Add a source. Requests (weakly) follow the source edge.
+    'addSource': function(source) {
+        this.sources.add(source);
+        if (this.isRequested()) {
+            source.addWeakRequest(this);
+        }
+        return this;
+    },
+
+    // Remove a source. Requests (weakly) follow the source edge.
+    'removeSource': function(source) {
+        this.sources.remove(source);
+        if (this.isRequested()) {
+            source.removeWeakRequest(this);
+        }
+        return this;
+    },
+
     'addRequest': function(request) {
         return this.changeRequested(function() {
             this.debugName() && console.log('%o(%o) add request %o', this, this.name, request);
+            request.sources.add(this);
             this.requests.add(request);
             this.addSink(request);
         });
