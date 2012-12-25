@@ -33,26 +33,34 @@ _.extend(Set.prototype, {
     'length': 0,
 
     'add': function(value) {
+        var added = false;
         var key = this.makeKey(value);
         if (!this.members.hasOwnProperty(key)) {
             this.length++;
+            added = true;
         }
         this.members[key] = value;
-        return this;
+        return added;
     },
 
     'remove': function(value) {
+        var removed = false;
         var key = this.makeKey(value);
         if (this.members.hasOwnProperty(key)) {
             this.length--;
+            removed = true;
         }
         delete this.members[key];
-        return this;
+        return removed;
     },
 
     'has': function(value) {
         var key = this.makeKey(value);
         return this.members.hasOwnProperty(key);
+    },
+
+    'isEmpty': function() {
+        return this.length === 0;
     },
 
     'clear': function() {
@@ -65,15 +73,10 @@ _.extend(Set.prototype, {
         return _.values(this.members);
     },
 
-    '_': function() {
-        if (arguments.length === 0) {
-            return _(this.members);
-        } else {
-            var args = _.toArray(arguments);
-            var fname = args[0];
-            args[0] = this.members;
-            return _[fname].apply(_, args);
-        }
+    '_': function(fname) {
+        var args = _.toArray(arguments);
+        args[0] = this.members;
+        return _[fname].apply(_, args);
     }
 });
 

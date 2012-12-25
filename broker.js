@@ -26,7 +26,8 @@ _.extend(Broker.prototype, {
         'processingLoop',
         'properties',
         'values',
-        'oldValues'],
+        'oldValues'
+    ],
 
     // Destroy the instance and all dependent requests and calculations.
     'destroy': function() {
@@ -267,8 +268,8 @@ util.makePrototype(DataBroker, Broker, {
 function ProcessingLoop(broker) {
     this.broker = broker;
     util.assert(this.broker, 'broker is missing');
-    this.locked = new NodeSet();
-    this.sourcesLocked = new NodeSet();
+    this.locked = new IdSet();
+    this.sourcesLocked = new IdSet();
 };
 _.extend(ProcessingLoop.prototype, {
     'debug': false,
@@ -282,7 +283,9 @@ _.extend(ProcessingLoop.prototype, {
         'addRequest': 2,
         'removeRequest': 3,
         'set': 4,
-        'modify': 6},
+        'defer': 5,
+        'modify': 6
+    },
 
     'makeChangeSortKey': function(change) {
         return this.actionToKey[change.action];
@@ -398,25 +401,28 @@ _.extend(ProcessingLoop.prototype, {
 
     'addRequest': function(property, change) {
         var request = change.args[0];
-
-        this.lockSources(request);
-        this.lockSources(property);
+        request.addSource(property);
 
         return this;
     },
 
     'removeRequest': function(property, change) {
         var request = change.args[0];
-
+        request.lockSelf();
         this.lockSources(request);
 
         return this;
     },
 
     'set': function(property) {
-        property.sinks._('each', this.lockSelf, this);
+        var lock = new ValueLock(property.name);
+        property.sinks._('invoke', 'addLock', lock);
 
         return this;
+    },
+
+    'defer': function() {
+        this.set.apply(this, arguments);
     },
 
     'modify': function() {
@@ -434,22 +440,22 @@ function BrokerNode(broker) {
 
     this.id = _.uniqueId('BrokerNode.');
     // `sources` are upstream nodes
-    this.sources = new NodeSet();
+    this.sources = new IdSet();
     // `sinks` are downstream nodes.
-    this.sinks = new NodeSet();
+    this.sinks = new IdSet();
     // `locks` is a semaphore controlling state transition for the instance.
-    this.locks = new NodeSet();
+    this.locks = new IdSet();
 };
 _.extend(BrokerNode.prototype, {
     'debug': false,
 
     'initialized': false,
 
-    'destroyProps': ['sinks', 'sources', 'locks'],
+    'selfLocked': false,
 
     'destroy': function() {
         if (this.broker) {
-            _.each(this.destroyProps, function(key) {
+            _.each(['sinks', 'sources', 'locks'], function(key) {
                 this[key].clear();
                 delete this[key];
             }, this);
@@ -491,85 +497,87 @@ _.extend(BrokerNode.prototype, {
     // accessors
 
     'isLocked': function() {
-        return this.locks.length > 0;
+        return this.isSelfLocked || !this.locks.isEmpty();
     },
 
     // modifiers
 
-    'addLock': function(property) {
+    'addLock': function(lock) {
         return this.changeLock(function() {
-            this.locks.add(property);
+            return this.locks.add(lock);
         });
     },
 
-    'removeLock': function(property) {
+    'removeLock': function(lock) {
         return this.changeLock(function() {
-            this.locks.remove(property);
+            return this.locks.remove(lock);
         });
     },
-
-    // Nodes are only self-locked during the processing loop.
 
     'lockSelf': function() {
-        return this.addLock(this);
+        return this.setSelfLocked(true);
     },
 
     'unlockSelf': function() {
-        return this.removeLock(this);
+        return this.setSelfLocked(false);
     },
 
-    // Sinks are locked whenever `this` becomes locked.
-
-    'lockSinks': function() {
-        this.sinks._('each', function(sink) {
-            sink.addLock(this);
-        }, this);
-        return this;
-    },
-
-    // Sinks are unlocked when `this` explicitly unlocks them, usually after its state is
-    // resolved.
-
-    'unlockSinks': function() {
-        this.sinks._('each', function(sink) {
-            sink.removeLock(this);
-        }, this);
-        return this;
+    'setSelfLocked': function(locked) {
+        return this.changeLock(function() {
+            return this.isSelfLocked = !!locked;
+        });
     },
 
     // utility
 
-    // Modify the lock set. Return `true` iff the locking state changed.
+    // Modify the lock set. Return the value of the wrapped function.
     'changeLock': function(func) {
         var wasLocked = this.isLocked();
-        func.call(this);
+        var returnValue = func.call(this);
         var isLocked = this.isLocked();
 
         if (wasLocked !== isLocked) {
             this[isLocked ? 'saveState' : 'considerState']();
-            return true;
-        } else {
-            return false;
         }
+        return returnValue;
     },
 
     // manage edges
 
+    'addSource': function(source) {
+        if (this.sources.add(source)) {
+            source.addSink(this);
+        }
+        return this;
+    },
+
+    'removeSource': function(source) {
+        if (this.sources.remove(source)) {
+            source.removeSink(this);
+        }
+        return this;
+    },
+
     // Add a sink. Locks follow the sink edge.
     'addSink': function(sink) {
         this.sinks.add(sink);
-        if (this.isLocked()) {
-            sink.addLock(this);
-        }
+        this.locks._('each', function(lock) {
+            sink.addLock(lock);
+        }, this);
         return this;
     },
 
     // Remove a sink. Locks follow the sink edge.
     'removeSink': function(sink) {
         this.sinks.remove(sink);
-        if (this.isLocked()) {
-            sink.removeLock(this);
-        }
+        this.locks._('each', function(lock) {
+            function hasLock(property) {
+                return property.locks.has(lock);
+            };
+            if (!this.sources._('any', hasLock)) {
+                sink.removeLock(lock);
+            }
+        }, this);
         return this;
     }
 });
@@ -789,9 +797,7 @@ function Property(broker, name) {
     this.name = name;
 
     // Requests are sinks that represent a requirement for the data this node provides.
-    this.requests = new NodeSet();
-    // Weak requests are sinks for which some sink is (weakly or strongly) requested.
-    this.weakRequests = new NodeSet();
+    this.requests = new IdSet();
 };
 util.makePrototype(Property, BrokerNode, {
     'calculation': null,
@@ -799,10 +805,8 @@ util.makePrototype(Property, BrokerNode, {
     'value': undefined,
 
     'destroy': function() {
-        _.each(['requests', 'weakRequests'], function(key) {
-            this[key].clear();
-            delete this[key];
-        }, this);
+        this.requests.clear();
+        delete this.requests;
         return BrokerNode.prototype.destroy.call(this);
     },
 
@@ -844,27 +848,15 @@ util.makePrototype(Property, BrokerNode, {
     // `Property`. Requests recursively follow the source relation as weak requests.
     'changeRequested': function(func) {
         var wasRequested = this.isRequested();
-        func.call(this);
+        var returnValue = func.call(this);
         var isRequested = this.isRequested();
 
         if (wasRequested !== isRequested) {
             this.sources._('each', function(source) {
-                source.addWeakRequest(this);
+                source.addRequest(this);
             }, this);
         }
-        return this;
-    },
-
-    'addWeakRequest': function(property) {
-        return this.changeRequested(function() {
-            this.weakRequests.add(property);
-        });
-    },
-
-    'removeWeakRequest': function(property) {
-        return this.changeRequested(function() {
-            this.weakRequests.remove(property);
-        });
+        return returnValue;
     },
 
     // state transitions
@@ -906,8 +898,9 @@ util.makePrototype(Property, BrokerNode, {
     // Add a source. Requests (weakly) follow the source edge.
     'addSource': function(source) {
         this.sources.add(source);
+        // XXX do this after locking
         if (this.isRequested()) {
-            source.addWeakRequest(this);
+            source.addRequest(this);
         }
         return this;
     },
@@ -915,8 +908,9 @@ util.makePrototype(Property, BrokerNode, {
     // Remove a source. Requests (weakly) follow the source edge.
     'removeSource': function(source) {
         this.sources.remove(source);
+        // XXX do this after locking
         if (this.isRequested()) {
-            source.removeWeakRequest(this);
+            source.removeRequest(this);
         }
         return this;
     },
@@ -989,12 +983,50 @@ util.makePrototype(Property, BrokerNode, {
 });
 
 
-function NodeSet() {
+function IdSet() {
     util.Set.apply(this, arguments);
 };
-util.makePrototype(NodeSet, util.Set, {
+util.makePrototype(IdSet, util.Set, {
     'makeKey': function(node) {
         return node.id;
+    }
+});
+
+
+function ValueLock(property) {
+    this.id = _.uniqueId('Broker.ValueLock.');
+    this.properties = new IdSet();
+
+    this.lockSinks(property);
+};
+_.extend(ValueLock.prototype, {
+    // Keep track of the next nodes to be unlocked.
+    'rememberSinks': function(property) {
+        property.sinks._('each', function(sink) {
+            this.properties.add(sink);
+        }, this);
+    },
+
+    // Walk the sink relation and lock properties.
+    'lockSinks': function(property) {
+        var queue = [property];
+        while (queue.length > 0) {
+            var next = queue.shift();
+            if (next.addLock(this)) {
+                next.sinks._('each', function(sink) {
+                    queue.push(sink);
+                }, this);
+            }
+        }
+    },
+
+    'unlockNextSinks': function() {
+        this.properties._('each', function(property) {
+            property.removeLock(this);
+            this.properties.remove(property);
+            this.rememberSinks(property);
+        }, this);
+        return this.properties.length > 0;
     }
 });
 
